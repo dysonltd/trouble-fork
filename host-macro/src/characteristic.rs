@@ -70,8 +70,8 @@ pub(crate) struct CharacteristicArgs {
     /// This is optional and can be used to set the initial value of the characteristic.
     #[darling(default)]
     pub value: Option<syn::Expr>,
-    // /// Descriptors for the characteristic.
-    // /// Descriptors are optional and can be used to add additional metadata to the characteristic.
+    /// Descriptors for the characteristic.
+    /// Descriptors are optional and can be used to add additional metadata to the characteristic.
     #[darling(default, multiple)]
     pub _descriptor: Vec<DescriptorArgs>,
 }

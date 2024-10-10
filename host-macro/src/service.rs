@@ -63,16 +63,14 @@ impl ServiceBuilder {
         let uuid = self.uuid;
 
         quote! {
-            #visibility struct #struct_name {
+            #visibility struct #struct_name<M: embassy_sync::blocking_mutex::raw::RawMutex> {
                 handle: AttributeHandle,
                 #fields
             }
 
             #[allow(unused)]
-            impl #struct_name {
-                #visibility fn new<M, const MAX_ATTRIBUTES: usize>(table: &mut AttributeTable<'_, M, MAX_ATTRIBUTES>) -> Self
-                where
-                    M: embassy_sync::blocking_mutex::raw::RawMutex,
+            impl<M: embassy_sync::blocking_mutex::raw::RawMutex> #struct_name<M> {
+                #visibility fn new<const MAX_ATTRIBUTES: usize>(table: &mut AttributeTable<'_, M, MAX_ATTRIBUTES>) -> Self
                 {
                     let mut service = table.add_service(Service::new(#uuid));
                     #code_build_chars
@@ -137,6 +135,7 @@ impl ServiceBuilder {
         // Process characteristic fields
         for ch in characteristics {
             let char_name = format_ident!("{}", ch.name);
+            let char_store = format_ident!("{}_store", ch.name);
             let uuid = ch.args.uuid;
 
             // TODO add methods to characteristic
@@ -161,6 +160,20 @@ impl ServiceBuilder {
                 colon_token: Default::default(),
                 vis: syn::Visibility::Inherited,
                 mutability: syn::FieldMutability::None,
+            });
+
+            // add field for characteristic data storage
+            fields.push(syn::Field {
+                ident: Some(char_store.clone()),
+                ty: syn::Type::Verbatim(quote!(embassy_sync::blocking_mutex::Mutex<M, core::cell::RefCell<#ty>>)),
+                attrs: Vec::new(),
+                colon_token: Default::default(),
+                vis: syn::Visibility::Inherited,
+                mutability: syn::FieldMutability::None,
+            });
+
+            self.code_struct_init.extend(quote_spanned! {ch.span=>
+                #char_store: embassy_sync::blocking_mutex::Mutex::new(core::cell::RefCell::new(<#ty>::default())),
             });
 
             self.construct_characteristic_static(&ch.name, ch.span, ty, &properties, uuid);
