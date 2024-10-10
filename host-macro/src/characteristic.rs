@@ -70,6 +70,12 @@ pub(crate) struct CharacteristicArgs {
     /// This is optional and can be used to set the initial value of the characteristic.
     #[darling(default)]
     pub value: Option<syn::Expr>,
+    /// Callback to be called when a write request is received
+    #[darling(default)]
+    pub write_cb: Option<syn::Ident>,
+    /// Callback to be called when a read request is received
+    #[darling(default)]
+    pub read_cb: Option<syn::Ident>,
     /// Descriptors for the characteristic.
     /// Descriptors are optional and can be used to add additional metadata to the characteristic.
     #[darling(default, multiple)]
@@ -100,6 +106,14 @@ impl CharacteristicArgs {
                     .map_err(|_| Error::custom("value must be followed by '= [data]'.  i.e. value = 'hello'".to_string()))?;
                     args.value = Some(value.parse()?);
                 },
+                "write_cb" => {
+                    let value = meta.value().map_err(|_| Error::custom("write_cb must be followed by '= [callback]'. i.e. write_cb = characterisic_on_write".to_string()))?;
+                    args.write_cb = Some(value.parse()?);
+                }
+                "read_cb" => {
+                    let value = meta.value().map_err(|_| Error::custom("read_cb must be followed by '= [callback]'. i.e. read_cb = characteristic_on_read".to_string()))?;
+                    args.read_cb = Some(value.parse()?);
+                }
                 other => return Err(
                     meta.error(
                         format!(

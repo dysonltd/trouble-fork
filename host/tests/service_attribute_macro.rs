@@ -5,7 +5,7 @@ use trouble_host::prelude::*;
 
 #[gatt_service(uuid = "7e701cf1-b1df-42a1-bb5f-6a1028c793b0")]
 struct CustomService {
-    #[characteristic(uuid = "2a37", read, write)]
+    #[characteristic(uuid = "2a37", read, read_cb = on_read, write, write_cb = on_write)]
     short_uuid: u8,
     #[characteristic(uuid = "7e711cf1-b1df-42a1-bb5f-6a1028c793b0", write_without_response, indicate)]
     long_uuid: f32,
