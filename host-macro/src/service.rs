@@ -134,8 +134,20 @@ impl ServiceBuilder {
 
         // Process characteristic fields
         for ch in characteristics {
-            let char_name = format_ident!("{}", ch.name);
-            let char_store = format_ident!("{}_store", ch.name);
+            let handle_ident = format_ident!("{}", ch.name);
+            let store_ident = format_ident!("{}_store", ch.name);
+            let read_callback_ident = format_ident!("{}_on_read", ch.name);
+            let read_callback = if let Some(callback) = &ch.args.on_read {
+                quote!(Some(#callback))
+            } else {
+                quote!(None)
+            };
+            let write_callback_ident = format_ident!("{}_on_write", ch.name);
+            let write_callback = if let Some(callback) = &ch.args.on_write {
+                quote!(Some(#callback))
+            } else {
+                quote!(None)
+            };
             let uuid = ch.args.uuid;
 
             // TODO add methods to characteristic
@@ -154,7 +166,7 @@ impl ServiceBuilder {
 
             // add fields for each characteristic value handle
             fields.push(syn::Field {
-                ident: Some(char_name.clone()),
+                ident: Some(handle_ident.clone()),
                 ty: syn::Type::Verbatim(quote!(Characteristic)),
                 attrs: Vec::new(),
                 colon_token: Default::default(),
@@ -165,7 +177,7 @@ impl ServiceBuilder {
             if !ch.args.app_managed {
                 // add field for characteristic data storage
                 fields.push(syn::Field {
-                    ident: Some(char_store.clone()),
+                    ident: Some(store_ident.clone()),
                     ty: syn::Type::Verbatim(quote!(embassy_sync::blocking_mutex::Mutex<M, core::cell::RefCell<#ty>>)),
                     attrs: Vec::new(),
                     colon_token: Default::default(),
@@ -174,9 +186,32 @@ impl ServiceBuilder {
                 });
 
                 self.code_struct_init.extend(quote_spanned! {ch.span=>
-                    #char_store: embassy_sync::blocking_mutex::Mutex::new(core::cell::RefCell::new(<#ty>::default())),
+                    #store_ident: embassy_sync::blocking_mutex::Mutex::new(core::cell::RefCell::new(<#ty>::default())),
                 });
             }
+
+            fields.push(syn::Field {
+                ident: Some(read_callback_ident.clone()),
+                ty: syn::Type::Verbatim(quote!(Option<fn(::trouble_host::connection::Connection) -> &[u8]>)),
+                attrs: Vec::new(),
+                vis: syn::Visibility::Inherited,
+                mutability: syn::FieldMutability::None,
+                colon_token: Default::default(),
+            });
+
+            fields.push(syn::Field {
+                attrs: Vec::new(),
+                vis: syn::Visibility::Inherited,
+                mutability: syn::FieldMutability::None,
+                ident: Some(write_callback_ident.clone()),
+                colon_token: Default::default(),
+                ty: syn::Type::Verbatim(quote!(Option<fn(::trouble_host::connection::Connection, &mut [u8])>)),
+            });
+
+            self.code_struct_init.extend(quote_spanned! {ch.span=>
+                #read_callback_ident: #read_callback,
+                #write_callback_ident: #write_callback,
+            });
 
             self.construct_characteristic_static(&ch.name, ch.span, ty, &properties, uuid);
         }
