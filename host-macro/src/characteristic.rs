@@ -76,6 +76,9 @@ pub(crate) struct CharacteristicArgs {
     /// Callback to be called when a read request is received
     #[darling(default)]
     pub on_read: Option<syn::Ident>,
+    /// Indicates that a characteristic is managed by the application. This includes allocation of memory and interaction with that memory.
+    #[darling(default)]
+    pub app_managed: bool,
     /// Descriptors for the characteristic.
     /// Descriptors are optional and can be used to add additional metadata to the characteristic.
     #[darling(default, multiple)]
@@ -114,10 +117,11 @@ impl CharacteristicArgs {
                     let value = meta.value().map_err(|_| Error::custom("on_read must be followed by '= [callback]'. i.e. on_read = characteristic_on_read".to_string()))?;
                     args.on_read = Some(value.parse()?);
                 }
+                "app_managed" => args.app_managed = true,
                 other => return Err(
                     meta.error(
                         format!(
-                            "Unsupported characteristic property: '{other}'.\nSupported properties are: uuid, read, write, write_without_response, notify, indicate, value, on_read, on_write"
+                            "Unsupported characteristic property: '{other}'.\nSupported properties are: uuid, read, write, write_without_response, notify, indicate, value, on_read, on_write, app_managed"
                         ))),
             };
             Ok(())

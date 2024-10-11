@@ -162,19 +162,21 @@ impl ServiceBuilder {
                 mutability: syn::FieldMutability::None,
             });
 
-            // add field for characteristic data storage
-            fields.push(syn::Field {
-                ident: Some(char_store.clone()),
-                ty: syn::Type::Verbatim(quote!(embassy_sync::blocking_mutex::Mutex<M, core::cell::RefCell<#ty>>)),
-                attrs: Vec::new(),
-                colon_token: Default::default(),
-                vis: syn::Visibility::Inherited,
-                mutability: syn::FieldMutability::None,
-            });
+            if !ch.args.app_managed {
+                // add field for characteristic data storage
+                fields.push(syn::Field {
+                    ident: Some(char_store.clone()),
+                    ty: syn::Type::Verbatim(quote!(embassy_sync::blocking_mutex::Mutex<M, core::cell::RefCell<#ty>>)),
+                    attrs: Vec::new(),
+                    colon_token: Default::default(),
+                    vis: syn::Visibility::Inherited,
+                    mutability: syn::FieldMutability::None,
+                });
 
-            self.code_struct_init.extend(quote_spanned! {ch.span=>
-                #char_store: embassy_sync::blocking_mutex::Mutex::new(core::cell::RefCell::new(<#ty>::default())),
-            });
+                self.code_struct_init.extend(quote_spanned! {ch.span=>
+                    #char_store: embassy_sync::blocking_mutex::Mutex::new(core::cell::RefCell::new(<#ty>::default())),
+                });
+            }
 
             self.construct_characteristic_static(&ch.name, ch.span, ty, &properties, uuid);
         }
