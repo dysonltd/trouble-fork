@@ -72,10 +72,10 @@ pub(crate) struct CharacteristicArgs {
     pub value: Option<syn::Expr>,
     /// Callback to be called when a write request is received
     #[darling(default)]
-    pub write_cb: Option<syn::Ident>,
+    pub on_write: Option<syn::Ident>,
     /// Callback to be called when a read request is received
     #[darling(default)]
-    pub read_cb: Option<syn::Ident>,
+    pub on_read: Option<syn::Ident>,
     /// Descriptors for the characteristic.
     /// Descriptors are optional and can be used to add additional metadata to the characteristic.
     #[darling(default, multiple)]
@@ -106,18 +106,18 @@ impl CharacteristicArgs {
                     .map_err(|_| Error::custom("value must be followed by '= [data]'.  i.e. value = 'hello'".to_string()))?;
                     args.value = Some(value.parse()?);
                 },
-                "write_cb" => {
-                    let value = meta.value().map_err(|_| Error::custom("write_cb must be followed by '= [callback]'. i.e. write_cb = characterisic_on_write".to_string()))?;
-                    args.write_cb = Some(value.parse()?);
+                "on_write" => {
+                    let value = meta.value().map_err(|_| Error::custom("on_write must be followed by '= [callback]'. i.e. on_write = characterisic_on_write".to_string()))?;
+                    args.on_write = Some(value.parse()?);
                 }
-                "read_cb" => {
-                    let value = meta.value().map_err(|_| Error::custom("read_cb must be followed by '= [callback]'. i.e. read_cb = characteristic_on_read".to_string()))?;
-                    args.read_cb = Some(value.parse()?);
+                "on_read" => {
+                    let value = meta.value().map_err(|_| Error::custom("on_read must be followed by '= [callback]'. i.e. on_read = characteristic_on_read".to_string()))?;
+                    args.on_read = Some(value.parse()?);
                 }
                 other => return Err(
                     meta.error(
                         format!(
-                            "Unsupported characteristic property: '{other}'.\nSupported properties are: uuid, read, write, write_without_response, notify, indicate, value"
+                            "Unsupported characteristic property: '{other}'.\nSupported properties are: uuid, read, write, write_without_response, notify, indicate, value, on_read, on_write"
                         ))),
             };
             Ok(())
