@@ -16,7 +16,7 @@ const VALUE_UUID: Uuid = Uuid::new_long([
     0x00, 0x00, 0x10, 0x01, 0xb0, 0xcd, 0x11, 0xec, 0x87, 0x1f, 0xd4, 0x5d, 0xdf, 0x13, 0x88, 0x40,
 ]);
 
-#[gatt_server]
+#[gatt_server(mutex_type = NoopRawMutex, attribute_data_size = 10, mtu = 27)]
 struct Server {
     service: CustomService,
 }
@@ -60,7 +60,7 @@ async fn gatt_client_server() {
         // Generic attribute service (mandatory)
         table.add_service(Service::new(0x1801));
 
-        let server: Server<common::Controller, NoopRawMutex, 10, 27> = Server::new(stack, &mut table);
+        let server: Server<common::Controller> = Server::new(stack, &mut table);
 
         select! {
             r = runner.run() => {
