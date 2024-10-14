@@ -38,6 +38,7 @@ pub(crate) struct ServiceBuilder {
     code_build_chars: TokenStream2,
     code_struct_init: TokenStream2,
     code_fields: TokenStream2,
+    code_characteristic_handles: Vec<TokenStream2>,
 }
 
 impl ServiceBuilder {
@@ -49,6 +50,7 @@ impl ServiceBuilder {
             code_impl: TokenStream2::new(),
             code_fields: TokenStream2::new(),
             code_build_chars: TokenStream2::new(),
+            code_characteristic_handles: Vec::new(),
         }
     }
     /// Construct the macro blueprint for the service struct.
@@ -60,6 +62,7 @@ impl ServiceBuilder {
         let code_impl = self.code_impl;
         let fields = self.code_fields;
         let code_build_chars = self.code_build_chars;
+        let code_characteristic_handles = &self.code_characteristic_handles;
         let uuid = self.uuid;
 
         quote! {
@@ -79,6 +82,10 @@ impl ServiceBuilder {
                         handle: service.build(),
                         #code_struct_init
                     }
+                }
+                #visibility fn has_characteristic_with_handle(&self, handle: u16) -> bool {
+                    let handles = [#(#code_characteristic_handles)|*];
+                    handles.contains(&handle)
                 }
                 #code_impl
             }
@@ -189,6 +196,9 @@ impl ServiceBuilder {
                     #store_ident: embassy_sync::blocking_mutex::Mutex::new(core::cell::RefCell::new(<#ty>::default())),
                 });
             }
+
+            self.code_characteristic_handles
+                .push(quote! {self.#handle_ident.handle()});
 
             fields.push(syn::Field {
                 ident: Some(read_callback_ident.clone()),

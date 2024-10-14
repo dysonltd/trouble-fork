@@ -564,6 +564,13 @@ pub struct Characteristic {
     pub(crate) handle: u16,
 }
 
+impl Characteristic {
+    /// Returns the attribute handle for the characteristic
+    pub fn handle(&self) -> u16 {
+        self.handle
+    }
+}
+
 /// Builder for characteristics.
 pub struct CharacteristicBuilder<'r, 'd, M: RawMutex, const MAX: usize> {
     handle: Characteristic,
