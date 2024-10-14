@@ -82,7 +82,7 @@ impl ServerBuilder {
             let service_type = &service.ty;
 
             code_service_definition.extend(quote_spanned! {service_span=>
-                #service_name: #service_type,
+                #service_name: #service_type<#mutex_type>,
             });
 
             code_service_init.extend(quote_spanned! {service_span=>
