@@ -43,4 +43,4 @@ fn on_read(_connection: Connection) -> &[u8] {
     &DATA[..]
 }
 
-fn on_write(_connection: Connection, _data: &mut [u8]) {}
+fn on_write(_connection: Connection, _data: &[u8]) {}

@@ -215,7 +215,7 @@ impl ServiceBuilder {
                 mutability: syn::FieldMutability::None,
                 ident: Some(write_callback_ident.clone()),
                 colon_token: Default::default(),
-                ty: syn::Type::Verbatim(quote!(Option<fn(::trouble_host::connection::Connection, &mut [u8])>)),
+                ty: syn::Type::Verbatim(quote!(Option<fn(::trouble_host::connection::Connection, &[u8])>)),
             });
 
             self.code_struct_init.extend(quote_spanned! {ch.span=>
