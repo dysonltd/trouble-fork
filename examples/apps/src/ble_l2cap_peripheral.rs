@@ -30,7 +30,7 @@ where
         ..
     } = stack.build();
 
-    let mut adv_data = [0; 31];
+    let mut adv_data = [0x41; 31];
     AdStructure::encode_slice(
         &[AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED)],
         &mut adv_data[..],
@@ -96,7 +96,7 @@ where
             let l2cap_channel_config = L2capChannelConfig {
                 mtu: 251,
                 flow_policy: CreditFlowPolicy::Every(50),
-                initial_credits: Some(50),
+                initial_credits: Some(200),
             };
 
             let mut ch1 = L2capChannel::accept(&stack, &conn, &[0x2349], &l2cap_channel_config)
@@ -106,9 +106,9 @@ where
             info!("L2CAP channel accepted");
 
             // Size of payload we're expecting
-            const PAYLOAD_LEN: usize = 494;
+            const PAYLOAD_LEN: usize = 978;
             let mut rx = [0; PAYLOAD_LEN];
-            for i in 0..10 {
+            for i in 0..1000u32 {
                 let len = ch1.receive(&stack, &mut rx).await.unwrap();
                 // assert_eq!(len, rx.len());
                 // assert_eq!(rx, [i; PAYLOAD_LEN]);
@@ -116,8 +116,8 @@ where
 
             info!("L2CAP data received, echoing");
             Timer::after(Duration::from_secs(1)).await;
-            for i in 0..10 {
-                let tx = [i; PAYLOAD_LEN];
+            for i in 0..1000u32 {
+                let tx = [0x41; PAYLOAD_LEN];
                 ch1.send::<_, L2CAP_MTU>(&stack, &tx).await.unwrap();
             }
             info!("L2CAP data echoed");

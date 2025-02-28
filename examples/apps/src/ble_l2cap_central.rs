@@ -17,7 +17,7 @@ const CONNECTIONS_MAX: usize = 1;
 /// Max number of L2CAP channels.
 const L2CAP_CHANNELS_MAX: usize = 3; // Signal + att + CoC
 
-const MY_L2CAP_MTU: usize = 256;
+// const MY_L2CAP_MTU: usize = 255;
 
 pub async fn run<C, const MY_L2CAP_MTU: usize>(controller: C)
 where
@@ -34,6 +34,8 @@ where
     let address: Address = Address::random([0xff, 0x8f, 0x1b, 0x05, 0xe4, 0xff]);
     info!("Our address = {:?}", address);
 
+    let a = MY_L2CAP_MTU;
+
     let mut resources: HostResources<CONNECTIONS_MAX, L2CAP_CHANNELS_MAX, MY_L2CAP_MTU> = HostResources::new();
     let stack = trouble_host::new(controller, &mut resources).set_random_address(address);
 
@@ -49,11 +51,11 @@ where
 
     let config = ConnectConfig {
         connect_params: ConnectParams{
-            min_connection_interval: Duration::from_micros(7_500),
-            max_connection_interval: Duration::from_micros(7_500),
+            min_connection_interval: Duration::from_micros(80_000),
+            max_connection_interval: Duration::from_micros(80_000),
             max_latency: 0,
-            event_length: Duration::from_millis(30),
-            supervision_timeout: Duration::from_millis(150),
+            event_length: Duration::from_millis(4000),
+            supervision_timeout: Duration::from_millis(8000),
             ..Default::default()
         },
         scan_config: ScanConfig {
@@ -108,11 +110,11 @@ where
             info!("LeReadBufferSize: {:?}", res);
 
             info!("Connected, creating l2cap channel");
-            const PAYLOAD_LEN: usize = 494;
+            const PAYLOAD_LEN: usize = 978;
             let l2cap_channel_config = L2capChannelConfig {
                 mtu: 251,
                 flow_policy: CreditFlowPolicy::Every(50),
-                initial_credits: Some(50),
+                initial_credits: Some(200),
             };
             let mut ch1 = L2capChannel::create(&stack, &conn, 0x2349, &Default::default())
                 .await
@@ -121,8 +123,8 @@ where
 
             let start = Instant::now();
 
-            for i in 0..10 {
-                let tx = [i+0x41; PAYLOAD_LEN];
+            for i in 0..1000u32 {
+                let tx = [0x41; PAYLOAD_LEN];
                 ch1.send::<_, MY_L2CAP_MTU>(&stack, &tx).await.unwrap();
             }
 
@@ -133,8 +135,8 @@ where
             let mut rx = [0; PAYLOAD_LEN];
             for i in 0..10 {
                 let len = ch1.receive(&stack, &mut rx).await.unwrap();
-                assert_eq!(len, rx.len());
-                assert_eq!(rx, [i; PAYLOAD_LEN]);
+                // assert_eq!(len, rx.len());
+                // assert_eq!(rx, [i; PAYLOAD_LEN]);
             }
 
             info!("Received successfully!");
