@@ -15,7 +15,7 @@ use bt_hci::cmd::le::{
 };
 use bt_hci::cmd::link_control::Disconnect;
 use bt_hci::cmd::{AsyncCmd, SyncCmd};
-use bt_hci::controller::{blocking, Controller, ControllerCmdAsync, ControllerCmdSync};
+use bt_hci::controller::{Controller, ControllerCmdAsync, ControllerCmdSync, blocking};
 use bt_hci::data::{AclBroadcastFlag, AclPacket, AclPacketBoundary};
 use bt_hci::event::le::LeEvent;
 use bt_hci::event::{Event, Vendor};
@@ -26,13 +26,14 @@ use bt_hci::param::{
 #[cfg(feature = "controller-host-flow-control")]
 use bt_hci::param::{ConnHandleCompletedPackets, ControllerToHostFlowControl};
 use bt_hci::{ControllerToHostPacket, FromHciBytes, WriteHci};
-use embassy_futures::select::{select3, Either3};
+use embassy_futures::select::{Either3, Either4, select3, select4};
 use embassy_sync::once_lock::OnceLock;
 use embassy_sync::waitqueue::WakerRegistration;
 #[cfg(feature = "gatt")]
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, channel::Channel};
 use futures::pin_mut;
 
+use crate::att::{AttClient, AttServer};
 use crate::channel_manager::{ChannelManager, ChannelStorage, PacketChannel};
 use crate::command::CommandState;
 #[cfg(feature = "gatt")]
@@ -43,9 +44,9 @@ use crate::l2cap::sar::{PacketReassembly, SarType};
 use crate::packet_pool::Pool;
 use crate::pdu::Pdu;
 use crate::types::l2cap::{
-    L2capHeader, L2capSignal, L2capSignalHeader, L2CAP_CID_ATT, L2CAP_CID_DYN_START, L2CAP_CID_LE_U_SIGNAL,
+    L2CAP_CID_ATT, L2CAP_CID_DYN_START, L2CAP_CID_LE_U_SIGNAL, L2capHeader, L2capSignal, L2capSignalHeader,
 };
-use crate::{att, config, Address, BleHostError, Error, Stack};
+use crate::{Address, BleHostError, Error, Stack, att, config};
 
 /// A BLE Host.
 ///
@@ -72,8 +73,6 @@ pub(crate) struct BleHost<'d, T> {
     pub(crate) advertise_command_state: CommandState<bool>,
     pub(crate) connect_command_state: CommandState<bool>,
     pub(crate) scan_command_state: CommandState<bool>,
-    #[cfg(feature = "scan")]
-    pub(crate) scan_state: ScanState,
 }
 
 #[derive(Clone, Copy)]
@@ -174,34 +173,6 @@ impl<'d> AdvState<'d> {
     }
 }
 
-pub(crate) struct ScanState {
-    writer: RefCell<Option<embassy_sync::pipe::DynamicWriter<'static>>>,
-}
-
-impl ScanState {
-    pub(crate) fn new() -> Self {
-        Self {
-            writer: RefCell::new(None),
-        }
-    }
-
-    pub(crate) fn reset(&self, writer: embassy_sync::pipe::DynamicWriter<'static>) {
-        self.writer.borrow_mut().replace(writer);
-    }
-
-    pub(crate) fn try_push(&self, _n_reports: u8, data: &[u8]) -> Result<(), ()> {
-        let mut writer = self.writer.borrow_mut();
-        if let Some(writer) = writer.as_mut() {
-            writer.try_write(data).map_err(|_| ())?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn stop(&self) {
-        let _ = self.writer.borrow_mut().take();
-    }
-}
-
 /// Host metrics
 #[derive(Default, Clone)]
 pub struct HostMetrics {
@@ -249,8 +220,6 @@ where
             tx_pool,
             #[cfg(feature = "gatt")]
             att_client: Channel::new(),
-            #[cfg(feature = "scan")]
-            scan_state: ScanState::new(),
             advertise_state: AdvState::new(advertise_handles),
             advertise_command_state: CommandState::new(),
             scan_command_state: CommandState::new(),
@@ -297,15 +266,13 @@ where
                     #[cfg(feature = "defmt")]
                     trace!(
                         "[host] connection with handle {:?} established to {:02x}",
-                        handle,
-                        peer_addr
+                        handle, peer_addr
                     );
 
                     #[cfg(feature = "log")]
                     trace!(
                         "[host] connection with handle {:?} established to {:02x?}",
-                        handle,
-                        peer_addr
+                        handle, peer_addr
                     );
                     let mut m = self.metrics.borrow_mut();
                     m.connect_events = m.connect_events.wrapping_add(1);
@@ -328,6 +295,10 @@ where
 
     fn handle_acl(&self, acl: AclPacket<'_>) -> Result<(), Error> {
         self.connections.received(acl.handle())?;
+        let handle = acl.handle();
+        let on_drop = OnDrop::new(|| {
+            self.connections.completed_packets(handle, 1);
+        });
         let (header, mut packet) = match acl.boundary_flag() {
             AclPacketBoundary::FirstFlushable => {
                 let (header, data) = L2capHeader::from_hci_bytes(acl.data())?;
@@ -380,10 +351,10 @@ where
                 // Handle ATT MTU exchange here since it doesn't strictly require
                 // gatt to be enabled.
                 let a = att::Att::decode(&packet.as_ref()[..header.length as usize]);
-                if let Ok(att::Att::Req(att::AttReq::ExchangeMtu { mtu })) = a {
+                if let Ok(att::Att::Client(AttClient::Request(att::AttReq::ExchangeMtu { mtu }))) = a {
                     let mtu = self.connections.exchange_att_mtu(acl.handle(), mtu);
 
-                    let rsp = att::AttRsp::ExchangeMtu { mtu };
+                    let rsp = att::Att::Server(AttServer::Response(att::AttRsp::ExchangeMtu { mtu }));
                     let l2cap = L2capHeader {
                         channel: L2CAP_CID_ATT,
                         length: 3,
@@ -396,25 +367,28 @@ where
                     info!("[host] agreed att MTU of {}", mtu);
                     let len = w.len();
                     self.connections.try_outbound(acl.handle(), Pdu::new(packet, len))?;
-                } else if let Ok(att::Att::Rsp(att::AttRsp::ExchangeMtu { mtu })) = a {
+                    on_drop.defuse();
+                } else if let Ok(att::Att::Server(AttServer::Response(att::AttRsp::ExchangeMtu { mtu }))) = a {
                     info!("[host] remote agreed att MTU of {}", mtu);
                     self.connections.exchange_att_mtu(acl.handle(), mtu);
                 } else {
                     #[cfg(feature = "gatt")]
                     match a {
-                        Ok(att::Att::Req(_)) => {
+                        Ok(att::Att::Client(_)) => {
                             let event = ConnectionEventData::Gatt {
                                 data: Pdu::new(packet, header.length as usize),
                             };
                             self.connections.post_handle_event(acl.handle(), event)?;
+                            on_drop.defuse();
                         }
-                        Ok(att::Att::Rsp(_)) => {
+                        Ok(att::Att::Server(_)) => {
                             if let Err(e) = self
                                 .att_client
                                 .try_send((acl.handle(), Pdu::new(packet, header.length as usize)))
                             {
                                 return Err(Error::OutOfMemory);
                             }
+                            on_drop.defuse();
                         }
                         Err(e) => {
                             warn!("Error decoding attribute payload: {:?}", e);
@@ -428,7 +402,9 @@ where
                 panic!("le signalling channel was fragmented, impossible!");
             }
             other if other >= L2CAP_CID_DYN_START => match self.channels.dispatch(header, packet) {
-                Ok(_) => {}
+                Ok(_) => {
+                    on_drop.defuse();
+                }
                 Err(e) => {
                     warn!("Error dispatching l2cap packet to channel: {:?}", e);
                     return Err(e);
@@ -446,28 +422,87 @@ where
         Ok(())
     }
 
-    // Request to send n ACL packets to the HCI controller for a connection
-    pub(crate) async fn acl(&self, handle: ConnHandle, n: u16) -> Result<AclSender<'_, 'd, T>, BleHostError<T::Error>> {
-        let grant = poll_fn(|cx| self.connections.poll_request_to_send(handle, n as usize, Some(cx))).await?;
-        Ok(AclSender {
+    // Send l2cap signal payload
+    pub(crate) async fn l2cap_signal<D: L2capSignal>(
+        &self,
+        conn: ConnHandle,
+        identifier: u8,
+        signal: &D,
+        p_buf: &mut [u8],
+    ) -> Result<(), BleHostError<T::Error>> {
+        //trace!(
+        //    "[l2cap] sending control signal (req = {}) signal: {:?}",
+        //    identifier,
+        //    signal
+        //);
+        let header = L2capSignalHeader {
+            identifier,
+            code: D::code(),
+            length: signal.size() as u16,
+        };
+        let l2cap = L2capHeader {
+            channel: D::channel(),
+            length: header.size() as u16 + header.length,
+        };
+
+        let mut w = WriteCursor::new(p_buf);
+        w.write_hci(&l2cap)?;
+        w.write_hci(&header)?;
+        w.write_hci(signal)?;
+
+        let mut sender = self.l2cap(conn, w.len() as u16, 1).await?;
+        sender.send(w.finish()).await?;
+
+        Ok(())
+    }
+
+    // Request to an L2CAP payload of len to the HCI controller for a connection.
+    //
+    // This function will request the appropriate number of ACL packets to be sent and
+    // the returned sender will handle fragmentation.
+    pub(crate) async fn l2cap(
+        &self,
+        handle: ConnHandle,
+        len: u16,
+        n_packets: u16,
+    ) -> Result<L2capSender<'_, 'd, T>, BleHostError<T::Error>> {
+        // Take into account l2cap header.
+        let acl_max = self.initialized.get().await.acl_max as u16;
+        let len = len + (4 * n_packets);
+        let n_acl = len.div_ceil(acl_max);
+        let grant = poll_fn(|cx| self.connections.poll_request_to_send(handle, n_acl as usize, Some(cx))).await?;
+        Ok(L2capSender {
             controller: &self.controller,
             handle,
             grant,
+            fragment_size: acl_max,
         })
     }
 
-    // Request to send n ACL packets to the HCI controller for a connection
-    pub(crate) fn try_acl(&self, handle: ConnHandle, n: u16) -> Result<AclSender<'_, 'd, T>, BleHostError<T::Error>> {
-        let grant = match self.connections.poll_request_to_send(handle, n as usize, None) {
+    // Request to an L2CAP payload of len to the HCI controller for a connection.
+    //
+    // This function will request the appropriate number of ACL packets to be sent and
+    // the returned sender will handle fragmentation.
+    pub(crate) fn try_l2cap(
+        &self,
+        handle: ConnHandle,
+        len: u16,
+        n_packets: u16,
+    ) -> Result<L2capSender<'_, 'd, T>, BleHostError<T::Error>> {
+        let acl_max = self.initialized.try_get().map(|i| i.acl_max).unwrap_or(27) as u16;
+        let len = len + (4 * n_packets);
+        let n_acl = len.div_ceil(acl_max);
+        let grant = match self.connections.poll_request_to_send(handle, n_acl as usize, None) {
             Poll::Ready(res) => res?,
             Poll::Pending => {
                 return Err(Error::Busy.into());
             }
         };
-        Ok(AclSender {
+        Ok(L2capSender {
             controller: &self.controller,
             handle,
             grant,
+            fragment_size: acl_max,
         })
     }
 
@@ -510,6 +545,21 @@ pub struct TxRunner<'d, C> {
     stack: &'d Stack<'d, C>,
 }
 
+/// Event handler.
+pub trait EventHandler {
+    /// Handle vendor events
+    fn on_vendor(&self, vendor: &Vendor) {}
+    /// Handle advertising reports
+    #[cfg(feature = "scan")]
+    fn on_adv_reports(&self, reports: bt_hci::param::LeAdvReportsIter) {}
+    /// Handle extended advertising reports
+    #[cfg(feature = "scan")]
+    fn on_ext_adv_reports(&self, reports: bt_hci::param::LeExtAdvReportsIter) {}
+}
+
+struct DummyHandler;
+impl EventHandler for DummyHandler {}
+
 impl<'d, C: Controller> Runner<'d, C> {
     pub(crate) fn new(stack: &'d Stack<'d, C>) -> Self {
         Self {
@@ -544,11 +594,12 @@ impl<'d, C: Controller> Runner<'d, C> {
             + for<'t> ControllerCmdSync<HostNumberOfCompletedPackets<'t>>
             + ControllerCmdSync<LeReadBufferSize>,
     {
-        self.run_with_handler(|_| {}).await
+        let dummy = DummyHandler;
+        self.run_with_handler(&dummy).await
     }
 
     /// Run the host with a vendor event handler for custom events.
-    pub async fn run_with_handler<F: Fn(&Vendor)>(&mut self, vendor_handler: F) -> Result<(), BleHostError<C::Error>>
+    pub async fn run_with_handler<E: EventHandler>(&mut self, event_handler: &E) -> Result<(), BleHostError<C::Error>>
     where
         C: ControllerCmdSync<Disconnect>
             + ControllerCmdSync<SetEventMask>
@@ -568,7 +619,7 @@ impl<'d, C: Controller> Runner<'d, C> {
             + ControllerCmdSync<LeReadBufferSize>,
     {
         let control_fut = self.control.run();
-        let rx_fut = self.rx.run_with_handler(vendor_handler);
+        let rx_fut = self.rx.run_with_handler(event_handler);
         let tx_fut = self.tx.run();
         pin_mut!(control_fut, rx_fut, tx_fut);
         match select3(&mut tx_fut, &mut rx_fut, &mut control_fut).await {
@@ -592,16 +643,17 @@ impl<'d, C: Controller> RxRunner<'d, C> {
     /// Run the receive loop that polls the controller for events.
     pub async fn run(&mut self) -> Result<(), BleHostError<C::Error>>
     where
-        C: ControllerCmdSync<Disconnect> + for<'t> ControllerCmdSync<HostNumberOfCompletedPackets<'t>>,
+        C: ControllerCmdSync<Disconnect>,
     {
-        self.run_with_handler(|_| {}).await
+        let dummy = DummyHandler;
+        self.run_with_handler(&dummy).await
     }
 
     /// Runs the receive loop that pools the controller for events, dispatching
     /// vendor events to the provided closure.
-    pub async fn run_with_handler<F: Fn(&Vendor)>(&mut self, vendor_handler: F) -> Result<(), BleHostError<C::Error>>
+    pub async fn run_with_handler<E: EventHandler>(&mut self, event_handler: &E) -> Result<(), BleHostError<C::Error>>
     where
-        C: ControllerCmdSync<Disconnect> + for<'t> ControllerCmdSync<HostNumberOfCompletedPackets<'t>>,
+        C: ControllerCmdSync<Disconnect>,
     {
         const MAX_HCI_PACKET_LEN: usize = 259;
         let host = &self.stack.host;
@@ -620,36 +672,8 @@ impl<'d, C: Controller> RxRunner<'d, C> {
             //        trace!("[host] polling took {} ms", (polled - started).as_millis());
             match result {
                 Ok(ControllerToHostPacket::Acl(acl)) => match host.handle_acl(acl) {
-                    Ok(_) => {
-                        //let processed = Instant::now();
-                        // trace!("[host] ACL process to {} ms", (processed - last).as_millis());
-                        #[cfg(feature = "controller-host-flow-control")]
-                        if let Err(e) =
-                            HostNumberOfCompletedPackets::new(&[ConnHandleCompletedPackets::new(acl.handle(), 1)])
-                                .exec(&host.controller)
-                                .await
-                        {
-                            // Only serious error if it's supposed to be connected
-                            if host.connections.get_connected_handle(acl.handle()).is_some() {
-                                error!("[host] error performing flow control on {:?}", acl.handle());
-                                return Err(e.into());
-                            }
-                        }
-                    }
+                    Ok(_) => {}
                     Err(e) => {
-                        #[cfg(feature = "controller-host-flow-control")]
-                        if let Err(e) =
-                            HostNumberOfCompletedPackets::new(&[ConnHandleCompletedPackets::new(acl.handle(), 1)])
-                                .exec(&host.controller)
-                                .await
-                        {
-                            // Only serious error if it's supposed to be connected
-                            if host.connections.get_connected_handle(acl.handle()).is_some() {
-                                error!("[host] error performing flow control on {:?}", acl.handle());
-                                return Err(e.into());
-                            }
-                        }
-
                         warn!(
                             "[host] encountered error processing ACL data for {:?}: {:?}",
                             acl.handle(),
@@ -696,55 +720,20 @@ impl<'d, C: Controller> RxRunner<'d, C> {
                                     host.connect_command_state.canceled();
                                 }
                             }
-                            LeEvent::LeScanTimeout(_) => {
-                                #[cfg(feature = "scan")]
-                                host.scan_state.stop();
-                            }
+                            LeEvent::LeScanTimeout(_) => {}
                             LeEvent::LeAdvertisingSetTerminated(set) => {
                                 host.advertise_state.terminate(set.adv_handle);
                             }
                             LeEvent::LeExtendedAdvertisingReport(data) => {
                                 #[cfg(feature = "scan")]
                                 {
-                                    let mut bytes = &data.reports.bytes[..];
-                                    let mut n = 0;
-                                    while n < data.reports.num_reports {
-                                        match bt_hci::param::LeExtAdvReport::from_hci_bytes(bytes) {
-                                            Ok((_, remaining)) => {
-                                                n += 1;
-                                                bytes = remaining;
-                                            }
-                                            Err(_) => {
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    let consumed = data.reports.bytes.len() - bytes.len();
-                                    if let Err(_) = host.scan_state.try_push(n, &data.reports.bytes[..consumed]) {
-                                        warn!("[host] scan buffer overflow");
-                                    }
+                                    event_handler.on_ext_adv_reports(data.reports.iter());
                                 }
                             }
                             LeEvent::LeAdvertisingReport(data) => {
                                 #[cfg(feature = "scan")]
                                 {
-                                    let mut bytes = &data.reports.bytes[..];
-                                    let mut n = 0;
-                                    while n < data.reports.num_reports {
-                                        match bt_hci::param::LeAdvReport::from_hci_bytes(bytes) {
-                                            Ok((_, remaining)) => {
-                                                n += 1;
-                                                bytes = remaining;
-                                            }
-                                            Err(_) => {
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    let consumed = data.reports.bytes.len() - bytes.len();
-                                    if let Err(_) = host.scan_state.try_push(n, &data.reports.bytes[..consumed]) {
-                                        warn!("[host] scan buffer overflow");
-                                    }
+                                    event_handler.on_adv_reports(data.reports.iter());
                                 }
                             }
                             _ => {
@@ -789,7 +778,7 @@ impl<'d, C: Controller> RxRunner<'d, C> {
                             }
                         }
                         Event::Vendor(vendor) => {
-                            vendor_handler(&vendor);
+                            event_handler.on_vendor(&vendor);
                         }
                         // Ignore
                         _ => {}
@@ -894,10 +883,16 @@ impl<'d, C: Controller> ControlRunner<'d, C> {
         });
         info!("[host] initialized");
 
+        #[allow(unused_mut)]
+        let mut completed_packets_cursor = 0;
         loop {
-            match select3(
+            match select4(
                 poll_fn(|cx| host.connections.poll_disconnecting(Some(cx))),
                 poll_fn(|cx| host.channels.poll_disconnecting(Some(cx))),
+                poll_fn(|cx| {
+                    host.connections
+                        .poll_completed_packets(completed_packets_cursor, Some(cx))
+                }),
                 select3(
                     poll_fn(|cx| host.connect_command_state.poll_cancelled(cx)),
                     poll_fn(|cx| host.advertise_command_state.poll_cancelled(cx)),
@@ -906,19 +901,33 @@ impl<'d, C: Controller> ControlRunner<'d, C> {
             )
             .await
             {
-                Either3::First(request) => {
+                Either4::First(request) => {
                     trace!("[host] poll disconnecting links");
                     host.command(Disconnect::new(request.handle(), request.reason()))
                         .await?;
                     request.confirm();
                 }
-                Either3::Second(request) => {
+                Either4::Second(request) => {
                     trace!("[host] poll disconnecting channels");
-                    let mut grant = host.acl(request.handle(), 1).await?;
-                    request.send(&mut grant).await?;
+                    request.send(host).await?;
                     request.confirm();
                 }
-                Either3::Third(states) => match states {
+                Either4::Third(completed) => {
+                    #[cfg(feature = "controller-host-flow-control")]
+                    {
+                        if let Err(e) = HostNumberOfCompletedPackets::new(&[ConnHandleCompletedPackets::new(
+                            completed.handle(),
+                            completed.amount(),
+                        )])
+                        .exec(&host.controller)
+                        .await
+                        {
+                            warn!("[host] error performing flow control");
+                        }
+                        completed_packets_cursor = completed.confirm();
+                    }
+                }
+                Either4::Fourth(states) => match states {
                     Either3::First(_) => {
                         trace!("[host] cancel connection create");
                         // trace!("[host] cancelling create connection");
@@ -965,109 +974,71 @@ impl<'d, C: Controller> TxRunner<'d, C> {
         let params = host.initialized.get().await;
         loop {
             let (conn, pdu) = host.connections.outbound().await;
-            let mut first = true;
-            for chunk in pdu.as_ref().chunks(params.acl_max) {
-                match host.acl(conn, 1).await {
-                    Ok(mut sender) => {
-                        if let Err(e) = sender.send(chunk, first).await {
-                            warn!("[host] error sending outbound pdu");
-                            return Err(e);
-                        }
-                        first = false;
-                    }
-                    Err(e) => {
-                        warn!("[host] error requesting sending outbound pdu");
+            match host.l2cap(conn, pdu.len as u16, 1).await {
+                Ok(mut sender) => {
+                    if let Err(e) = sender.send(pdu.as_ref()).await {
+                        warn!("[host] error sending outbound pdu");
                         return Err(e);
                     }
+                }
+                Err(BleHostError::BleHost(Error::NotFound)) => {
+                    warn!("[host] unable to send data to disconnected host (ignored)");
+                }
+                Err(BleHostError::BleHost(Error::Disconnected)) => {
+                    warn!("[host] unable to send data to disconnected host (ignored)");
+                }
+                Err(e) => {
+                    warn!("[host] error requesting sending outbound pdu");
+                    return Err(e);
                 }
             }
         }
     }
 }
 
-pub struct AclSender<'a, 'd, T: Controller> {
+pub struct L2capSender<'a, 'd, T: Controller> {
     pub(crate) controller: &'a T,
     pub(crate) handle: ConnHandle,
     pub(crate) grant: PacketGrant<'a, 'd>,
+    pub(crate) fragment_size: u16,
 }
 
-impl<'a, 'd, T: Controller> AclSender<'a, 'd, T> {
-    pub(crate) fn try_send(&mut self, pdu: &[u8], first: bool) -> Result<(), BleHostError<T::Error>>
+impl<'a, 'd, T: Controller> L2capSender<'a, 'd, T> {
+    pub(crate) fn try_send(&mut self, pdu: &[u8]) -> Result<(), BleHostError<T::Error>>
     where
         T: blocking::Controller,
     {
-        let acl = AclPacket::new(
-            self.handle,
-            if first {
-                AclPacketBoundary::FirstNonFlushable
-            } else {
-                AclPacketBoundary::Continuing
-            },
-            AclBroadcastFlag::PointToPoint,
-            pdu,
-        );
-        // info!("Sent ACL {:?}", acl);
-        match self.controller.try_write_acl_data(&acl) {
-            Ok(result) => {
-                self.grant.confirm(1);
-                Ok(result)
+        let mut pbf = AclPacketBoundary::FirstNonFlushable;
+        for chunk in pdu.chunks(self.fragment_size as usize) {
+            let acl = AclPacket::new(self.handle, pbf, AclBroadcastFlag::PointToPoint, chunk);
+            // info!("Sent ACL {:?}", acl);
+            match self.controller.try_write_acl_data(&acl) {
+                Ok(result) => {
+                    self.grant.confirm(1);
+                }
+                Err(blocking::TryError::Busy) => {
+                    warn!("hci: acl data send busy");
+                    return Err(Error::Busy.into());
+                }
+                Err(blocking::TryError::Error(e)) => return Err(BleHostError::Controller(e)),
             }
-            Err(blocking::TryError::Busy) => {
-                warn!("hci: acl data send busy");
-                Err(Error::Busy.into())
-            }
-            Err(blocking::TryError::Error(e)) => Err(BleHostError::Controller(e)),
+            pbf = AclPacketBoundary::Continuing;
         }
-    }
-
-    pub(crate) async fn send(&mut self, pdu: &[u8], first: bool) -> Result<(), BleHostError<T::Error>> {
-        let acl = AclPacket::new(
-            self.handle,
-            if first {
-                AclPacketBoundary::FirstNonFlushable
-            } else {
-                AclPacketBoundary::Continuing
-            },
-            AclBroadcastFlag::PointToPoint,
-            pdu,
-        );
-        // info!("Sent ACL {:?}", acl);
-        self.controller
-            .write_acl_data(&acl)
-            .await
-            .map_err(BleHostError::Controller)?;
-        self.grant.confirm(1);
         Ok(())
     }
 
-    pub(crate) async fn signal<D: L2capSignal>(
-        &mut self,
-        identifier: u8,
-        signal: &D,
-        p_buf: &mut [u8],
-    ) -> Result<(), BleHostError<T::Error>> {
-        //trace!(
-        //    "[l2cap] sending control signal (req = {}) signal: {:?}",
-        //    identifier,
-        //    signal
-        //);
-        let header = L2capSignalHeader {
-            identifier,
-            code: D::code(),
-            length: signal.size() as u16,
-        };
-        let l2cap = L2capHeader {
-            channel: D::channel(),
-            length: header.size() as u16 + header.length,
-        };
-
-        let mut w = WriteCursor::new(p_buf);
-        w.write_hci(&l2cap)?;
-        w.write_hci(&header)?;
-        w.write_hci(signal)?;
-
-        self.send(w.finish(), true).await?;
-
+    pub(crate) async fn send(&mut self, pdu: &[u8]) -> Result<(), BleHostError<T::Error>> {
+        let mut pbf = AclPacketBoundary::FirstNonFlushable;
+        for chunk in pdu.chunks(self.fragment_size as usize) {
+            let acl = AclPacket::new(self.handle, pbf, AclBroadcastFlag::PointToPoint, chunk);
+            // info!("Sent ACL {:?}", acl);
+            self.controller
+                .write_acl_data(&acl)
+                .await
+                .map_err(BleHostError::Controller)?;
+            self.grant.confirm(1);
+            pbf = AclPacketBoundary::Continuing;
+        }
         Ok(())
     }
 }

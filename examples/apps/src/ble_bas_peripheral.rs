@@ -1,4 +1,5 @@
-use embassy_futures::{join::join, select::select};
+use embassy_futures::join::join;
+use embassy_futures::select::select;
 use embassy_time::Timer;
 use trouble_host::prelude::*;
 
@@ -7,8 +8,6 @@ const CONNECTIONS_MAX: usize = 1;
 
 /// Max number of L2CAP channels.
 const L2CAP_CHANNELS_MAX: usize = 2; // Signal + att
-
-const MAX_ATTRIBUTES: usize = 10;
 
 // GATT Server definition
 #[gatt_server]
@@ -21,7 +20,7 @@ struct Server {
 struct BatteryService {
     /// Battery Level
     #[descriptor(uuid = descriptors::VALID_RANGE, read, value = [0, 100])]
-    #[descriptor(uuid = descriptors::MEASUREMENT_DESCRIPTION, read, value = "Battery Level")]
+    #[descriptor(uuid = descriptors::MEASUREMENT_DESCRIPTION, name = "hello", read, value = "Battery Level")]
     #[characteristic(uuid = characteristic::BATTERY_LEVEL, read, notify, value = 10)]
     level: u8,
     #[characteristic(uuid = "408813df-5dd4-1f87-ec11-cdb001100000", write, read, notify)]
@@ -79,7 +78,7 @@ where
 ///
 /// If you didn't require this to be generic for your application, you could statically spawn this with i.e.
 ///
-/// ```rust [ignore]
+/// ```rust,ignore
 ///
 /// #[embassy_executor::task]
 /// async fn ble_task(mut runner: Runner<'static, SoftdeviceController<'static>>) {
@@ -120,15 +119,30 @@ async fn gatt_events_task(server: &Server<'_>, conn: &Connection<'_>) -> Result<
                 // the protocol details
                 match data.process(server).await {
                     // Server processing emits
-                    Ok(Some(GattEvent::Read(event))) => {
-                        if event.handle() == level.handle {
-                            let value = server.get(&level);
-                            info!("[gatt] Read Event to Level Characteristic: {:?}", value);
+                    Ok(Some(event)) => {
+                        match &event {
+                            GattEvent::Read(event) => {
+                                if event.handle() == level.handle {
+                                    let value = server.get(&level);
+                                    info!("[gatt] Read Event to Level Characteristic: {:?}", value);
+                                }
+                            }
+                            GattEvent::Write(event) => {
+                                if event.handle() == level.handle {
+                                    info!("[gatt] Write Event to Level Characteristic: {:?}", event.data());
+                                }
+                            }
                         }
-                    }
-                    Ok(Some(GattEvent::Write(event))) => {
-                        if event.handle() == level.handle {
-                            info!("[gatt] Write Event to Level Characteristic: {:?}", event.data());
+
+                        // This step is also performed at drop(), but writing it explicitly is necessary
+                        // in order to ensure reply is sent.
+                        match event.accept() {
+                            Ok(reply) => {
+                                reply.send().await;
+                            }
+                            Err(e) => {
+                                warn!("[gatt] error sending response: {:?}", e);
+                            }
                         }
                     }
                     Ok(_) => {}
@@ -152,7 +166,7 @@ async fn advertise<'a, C: Controller>(
     AdStructure::encode_slice(
         &[
             AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
-            AdStructure::ServiceUuids16(&[Uuid::Uuid16([0x0f, 0x18])]),
+            AdStructure::ServiceUuids16(&[[0x0f, 0x18]]),
             AdStructure::CompleteLocalName(name.as_bytes()),
         ],
         &mut advertiser_data[..],
